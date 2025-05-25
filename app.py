@@ -1,7 +1,10 @@
 from flask import Flask, request, jsonify
 import json
+import os
 from datetime import datetime
 import logging
+import signal
+import sys
 
 # Configurar logging
 logging.basicConfig(
@@ -9,6 +12,16 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Handler para capturar sinais de shutdown
+def signal_handler(signum, frame):
+    logger.warning(f"🔥 Sinal recebido: {signum} - Aplicação sendo encerrada")
+    logger.warning(f"📍 Frame: {frame}")
+    sys.exit(0)
+
+# Registrar handlers para sinais comuns
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
 
 app = Flask(__name__)
 
@@ -49,10 +62,12 @@ def health_check():
     """
     Endpoint de health check
     """
+    logger.info("🩺 Health check acessado")
     return jsonify({
         "status": "online",
         "service": "Lastlink Webhook Receiver",
         "timestamp": datetime.now().isoformat(),
+        "pid": os.getpid(),
         "endpoints": [
             "/webhook/lastlink",
             "/webhook/lastlink/orders", 
@@ -66,7 +81,12 @@ def health():
     """
     Endpoint alternativo de health check
     """
-    return jsonify({"status": "healthy"}), 200
+    logger.info("🩺 Health endpoint acessado")
+    return jsonify({
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "pid": os.getpid()
+    }), 200
 
 @app.route('/webhook/lastlink', methods=['POST'])
 def lastlink_webhook():
@@ -211,15 +231,12 @@ def lastlink_customers_webhook():
         logger.error(f"❌ Erro no webhook de clientes: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 400
 
-# Log de inicialização apenas uma vez
-logger.info("🚀 Webhook Lastlink inicializado com sucesso!")
-logger.info("📡 Endpoints disponíveis:")
-logger.info("  └─ GET / (health check)")
-logger.info("  └─ GET /health")
-logger.info("  └─ POST /webhook/lastlink (principal)")
-logger.info("  └─ POST /webhook/lastlink/orders")
-logger.info("  └─ POST /webhook/lastlink/payments")
-logger.info("  └─ POST /webhook/lastlink/customers")
+# Log de inicialização apenas uma vez para evitar spam nos logs
+if not hasattr(print_received_data, '_logged'):
+    port = os.getenv('PORT', '5001')
+    logger.info(f"🚀 Webhook Lastlink inicializado na porta {port}")
+    logger.info("📡 Endpoints: /, /health, /webhook/lastlink/*")
+    print_received_data._logged = True
 
 # REMOVIDO: app.run() - o Gunicorn gerencia a execução
 # Quando usar Gunicorn, não incluir app.run()
@@ -227,4 +244,5 @@ logger.info("  └─ POST /webhook/lastlink/customers")
 if __name__ == '__main__':
     # Este bloco só será executado se rodar diretamente com Python
     # Para desenvolvimento local apenas
-    app.run(host='0.0.0.0', port=5001, debug=True)
+    port = int(os.getenv('PORT', 5001))
+    app.run(host='0.0.0.0', port=port, debug=False)

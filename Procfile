@@ -1,1 +1,1 @@
-web: gunicorn -w 4 -b 0.0.0.0:5001 webhook_lastlink:app
+web: gunicorn --bind 0.0.0.0:$PORT --workers 1 --timeout 120 --keep-alive 2 --log-level info app:app
