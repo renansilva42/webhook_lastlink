@@ -43,6 +43,31 @@ def print_received_data(data, event_type="webhook"):
         logger.info(f"💾 Dados: {data}")
     
     logger.info("="*60 + "\n")
+
+@app.route('/', methods=['GET'])
+def health_check():
+    """
+    Endpoint de health check
+    """
+    return jsonify({
+        "status": "online",
+        "service": "Lastlink Webhook Receiver",
+        "timestamp": datetime.now().isoformat(),
+        "endpoints": [
+            "/webhook/lastlink",
+            "/webhook/lastlink/orders", 
+            "/webhook/lastlink/payments",
+            "/webhook/lastlink/customers"
+        ]
+    }), 200
+
+@app.route('/health', methods=['GET'])
+def health():
+    """
+    Endpoint alternativo de health check
+    """
+    return jsonify({"status": "healthy"}), 200
+
 @app.route('/webhook/lastlink', methods=['POST'])
 def lastlink_webhook():
     """
@@ -99,6 +124,7 @@ def lastlink_webhook():
             "message": error_msg,
             "timestamp": datetime.now().isoformat()
         }), 400
+
 @app.route('/webhook/lastlink/orders', methods=['POST'])
 def lastlink_orders_webhook():
     """
@@ -126,6 +152,7 @@ def lastlink_orders_webhook():
     except Exception as e:
         logger.error(f"❌ Erro no webhook de pedidos: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 400
+
 @app.route('/webhook/lastlink/payments', methods=['POST'])
 def lastlink_payments_webhook():
     """
@@ -154,6 +181,7 @@ def lastlink_payments_webhook():
     except Exception as e:
         logger.error(f"❌ Erro no webhook de pagamentos: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 400
+
 @app.route('/webhook/lastlink/customers', methods=['POST'])
 def lastlink_customers_webhook():
     """
@@ -182,23 +210,21 @@ def lastlink_customers_webhook():
     except Exception as e:
         logger.error(f"❌ Erro no webhook de clientes: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 400
+
+# Log de inicialização apenas uma vez
+logger.info("🚀 Webhook Lastlink inicializado com sucesso!")
+logger.info("📡 Endpoints disponíveis:")
+logger.info("  └─ GET / (health check)")
+logger.info("  └─ GET /health")
+logger.info("  └─ POST /webhook/lastlink (principal)")
+logger.info("  └─ POST /webhook/lastlink/orders")
+logger.info("  └─ POST /webhook/lastlink/payments")
+logger.info("  └─ POST /webhook/lastlink/customers")
+
+# REMOVIDO: app.run() - o Gunicorn gerencia a execução
+# Quando usar Gunicorn, não incluir app.run()
+
 if __name__ == '__main__':
-    logger.info("\n🚀 INICIANDO WEBHOOK LASTLINK")
-    logger.info("="*50)
-    logger.info("📡 Endpoints disponíveis:")
-    logger.info("  └─ POST /webhook/lastlink (principal)")
-    logger.info("  └─ POST /webhook/lastlink/orders")
-    logger.info("  └─ POST /webhook/lastlink/payments")
-    logger.info("  └─ POST /webhook/lastlink/customers")
-    logger.info("  └─ GET /health")
-    logger.info("  └─ GET /")
-    logger.info("="*50)
-    logger.info("🔄 Aguardando webhooks...")
-    logger.info("="*50 + "\n")
-    
-    # Executar o servidor
-    app.run(
-        host='0.0.0.0',
-        port=5001,
-        debug=False
-    )
+    # Este bloco só será executado se rodar diretamente com Python
+    # Para desenvolvimento local apenas
+    app.run(host='0.0.0.0', port=5001, debug=True)
