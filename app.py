@@ -1,248 +1,268 @@
-from flask import Flask, request, jsonify
+#!/usr/bin/env python3
+"""
+Custom Webhook Receiver
+Um webhook poderoso e flexível para receber dados de fontes externas em tempo real.
+Compatível com EasyPanel e outros ambientes de deployment.
+"""
+
 import json
+import logging
 import os
 from datetime import datetime
-import logging
-import signal
-import sys
+from flask import Flask, request, jsonify
+import xml.etree.ElementTree as ET
+from urllib.parse import parse_qs
+import hashlib
+import hmac
 
-# Configurar logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-# Handler para capturar sinais de shutdown
-def signal_handler(signum, frame):
-    logger.warning(f"🔥 Sinal recebido: {signum} - Aplicação sendo encerrada")
-    logger.warning(f"📍 Frame: {frame}")
-    sys.exit(0)
-
-# Registrar handlers para sinais comuns
-signal.signal(signal.SIGTERM, signal_handler)
-signal.signal(signal.SIGINT, signal_handler)
-
+# Configuração da aplicação
 app = Flask(__name__)
 
-def print_received_data(data, event_type="webhook"):
-    """
-    Função para imprimir os dados recebidos de forma organizada
-    """
-    logger.info("\n" + "="*60)
-    logger.info(f"🔔 WEBHOOK LASTLINK RECEBIDO - {event_type.upper()}")
-    logger.info("="*60)
-    logger.info(f"📅 Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    logger.info(f"📊 Tipo de Evento: {event_type}")
-    logger.info("\n📋 DADOS RECEBIDOS:")
-    logger.info("-"*40)
-    
-    # Imprimir dados de forma estruturada
-    if isinstance(data, dict):
-        for key, value in data.items():
-            if isinstance(value, dict):
-                logger.info(f"🔸 {key}:")
-                for sub_key, sub_value in value.items():
-                    logger.info(f"   └─ {sub_key}: {sub_value}")
-            elif isinstance(value, list):
-                logger.info(f"🔸 {key}: [{len(value)} itens]")
-                for i, item in enumerate(value[:3]):  # Mostrar apenas os 3 primeiros
-                    logger.info(f"   └─ [{i}] {item}")
-                if len(value) > 3:
-                    logger.info(f"   └─ ... e mais {len(value) - 3} itens")
-            else:
-                logger.info(f"🔸 {key}: {value}")
-    else:
-        logger.info(f"💾 Dados: {data}")
-    
-    logger.info("="*60 + "\n")
+# Configuração de logging para EasyPanel
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),  # Para logs do EasyPanel
+        logging.FileHandler('webhook.log')  # Backup em arquivo
+    ]
+)
 
-@app.route('/', methods=['GET'])
-def health_check():
-    """
-    Endpoint de health check
-    """
-    logger.info("🩺 Health check acessado")
-    return jsonify({
-        "status": "online",
-        "service": "Lastlink Webhook Receiver",
-        "timestamp": datetime.now().isoformat(),
-        "pid": os.getpid(),
-        "endpoints": [
-            "/webhook/lastlink",
-            "/webhook/lastlink/orders", 
-            "/webhook/lastlink/payments",
-            "/webhook/lastlink/customers"
-        ]
-    }), 200
+logger = logging.getLogger(__name__)
+
+# Configurações via variáveis de ambiente
+WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET', '')  # Para verificação de segurança
+WEBHOOK_TOKEN = os.getenv('WEBHOOK_TOKEN', '')   # Token de autenticação
+PORT = int(os.getenv('PORT', 8080))
+HOST = os.getenv('HOST', '0.0.0.0')
+
+def log_request_details(request_data, content_type, headers, source_ip):
+    """Log detalhado dos dados recebidos"""
+    separator = "=" * 80
+    
+    logger.info(f"\n{separator}")
+    logger.info("🔔 WEBHOOK DATA RECEIVED")
+    logger.info(f"{separator}")
+    logger.info(f"📅 Timestamp: {datetime.now().isoformat()}")
+    logger.info(f"🌐 Source IP: {source_ip}")
+    logger.info(f"📋 Content-Type: {content_type}")
+    logger.info(f"📊 Data Size: {len(str(request_data))} characters")
+    
+    # Log headers importantes
+    important_headers = ['user-agent', 'x-forwarded-for', 'authorization', 
+                        'x-hub-signature', 'x-github-event', 'x-gitlab-event']
+    
+    logger.info("📋 Headers:")
+    for header in important_headers:
+        if header in headers:
+            logger.info(f"  {header}: {headers[header]}")
+    
+    # Log dos dados recebidos
+    logger.info("📦 Data Received:")
+    logger.info("-" * 40)
+    
+    if isinstance(request_data, dict):
+        logger.info(json.dumps(request_data, indent=2, ensure_ascii=False))
+    else:
+        logger.info(str(request_data))
+    
+    logger.info(f"{separator}\n")
+
+def verify_signature(payload, signature, secret):
+    """Verifica assinatura HMAC para segurança (GitHub, GitLab style)"""
+    if not secret or not signature:
+        return True
+    
+    expected_signature = hmac.new(
+        secret.encode('utf-8'),
+        payload,
+        hashlib.sha256
+    ).hexdigest()
+    
+    return hmac.compare_digest(f'sha256={expected_signature}', signature)
+
+def parse_xml_to_dict(xml_string):
+    """Converte XML para dicionário"""
+    try:
+        root = ET.fromstring(xml_string)
+        
+        def xml_to_dict(element):
+            result = {}
+            
+            # Adiciona atributos
+            if element.attrib:
+                result['@attributes'] = element.attrib
+            
+            # Adiciona texto se existir
+            if element.text and element.text.strip():
+                if len(element) == 0:
+                    return element.text.strip()
+                result['#text'] = element.text.strip()
+            
+            # Adiciona elementos filhos
+            for child in element:
+                child_data = xml_to_dict(child)
+                if child.tag in result:
+                    if not isinstance(result[child.tag], list):
+                        result[child.tag] = [result[child.tag]]
+                    result[child.tag].append(child_data)
+                else:
+                    result[child.tag] = child_data
+            
+            return result
+        
+        return {root.tag: xml_to_dict(root)}
+    except ET.ParseError as e:
+        logger.error(f"XML Parse Error: {e}")
+        return {"error": "Invalid XML", "raw_data": xml_string}
+
+@app.before_request
+def log_request_info():
+    """Log informações básicas de cada request"""
+    logger.info(f"📨 Incoming request: {request.method} {request.path} from {request.remote_addr}")
+
+@app.route('/webhook', methods=['POST'])
+def webhook_receiver():
+    """Endpoint principal do webhook"""
+    try:
+        # Verificação de autenticação por token
+        if WEBHOOK_TOKEN:
+            auth_header = request.headers.get('Authorization', '')
+            provided_token = auth_header.replace('Bearer ', '').replace('Token ', '')
+            
+            if provided_token != WEBHOOK_TOKEN:
+                logger.warning(f"🚫 Unauthorized webhook attempt from {request.remote_addr}")
+                return jsonify({"error": "Unauthorized"}), 401
+
+        # Captura informações da requisição
+        content_type = request.content_type or 'unknown'
+        headers = dict(request.headers)
+        source_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+        
+        # Verificação de assinatura (se configurada)
+        if WEBHOOK_SECRET:
+            signature = request.headers.get('X-Hub-Signature-256') or request.headers.get('X-Signature')
+            if not verify_signature(request.get_data(), signature, WEBHOOK_SECRET):
+                logger.warning(f"🚫 Invalid signature from {source_ip}")
+                return jsonify({"error": "Invalid signature"}), 403
+
+        # Processamento baseado no Content-Type
+        request_data = None
+        
+        if 'application/json' in content_type:
+            try:
+                request_data = request.get_json()
+                if request_data is None:
+                    request_data = {"raw_body": request.get_data(as_text=True)}
+            except Exception as e:
+                logger.error(f"JSON parse error: {e}")
+                request_data = {"error": "Invalid JSON", "raw_body": request.get_data(as_text=True)}
+        
+        elif 'application/xml' in content_type or 'text/xml' in content_type:
+            xml_data = request.get_data(as_text=True)
+            request_data = parse_xml_to_dict(xml_data)
+        
+        elif 'application/x-www-form-urlencoded' in content_type:
+            request_data = dict(request.form)
+        
+        elif 'multipart/form-data' in content_type:
+            request_data = {
+                'form_data': dict(request.form),
+                'files': [f.filename for f in request.files.values()]
+            }
+        
+        else:
+            # Dados raw para outros tipos
+            raw_data = request.get_data(as_text=True)
+            request_data = {
+                "content_type": content_type,
+                "raw_data": raw_data,
+                "size": len(raw_data)
+            }
+
+        # Log detalhado dos dados recebidos
+        log_request_details(request_data, content_type, headers, source_ip)
+        
+        # Resposta de sucesso
+        response_data = {
+            "status": "success",
+            "message": "Webhook received successfully",
+            "timestamp": datetime.now().isoformat(),
+            "data_received": True,
+            "content_type": content_type
+        }
+        
+        logger.info("✅ Webhook processed successfully")
+        return jsonify(response_data), 200
+
+    except Exception as e:
+        logger.error(f"❌ Error processing webhook: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "message": "Internal server error",
+            "timestamp": datetime.now().isoformat()
+        }), 500
+
+@app.route('/webhook/<path:custom_path>', methods=['POST'])
+def custom_webhook_receiver(custom_path):
+    """Webhook com path customizado"""
+    logger.info(f"📍 Custom webhook path: /{custom_path}")
+    return webhook_receiver()
 
 @app.route('/health', methods=['GET'])
-def health():
-    """
-    Endpoint alternativo de health check
-    """
-    logger.info("🩺 Health endpoint acessado")
+def health_check():
+    """Health check para monitoramento"""
     return jsonify({
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "pid": os.getpid()
+        "service": "Custom Webhook Receiver"
     }), 200
 
-@app.route('/webhook/lastlink', methods=['POST'])
-def lastlink_webhook():
-    """
-    Endpoint principal para receber webhooks da Lastlink
-    """
-    try:
-        # Obter dados do request
-        content_type = request.content_type
-        headers = dict(request.headers)
-        
-        # Processar dados baseado no Content-Type
-        if content_type and 'application/json' in content_type:
-            data = request.get_json()
-        else:
-            data = request.form.to_dict() if request.form else request.get_data(as_text=True)
-        
-        # Imprimir informações do cabeçalho
-        logger.info("\n" + "="*60)
-        logger.info("📡 INFORMAÇÕES DO REQUEST")
-        logger.info("="*60)
-        logger.info(f"🌐 Método: {request.method}")
-        logger.info(f"🔗 URL: {request.url}")
-        logger.info(f"📝 Content-Type: {content_type}")
-        logger.info(f"🔑 Headers relevantes:")
-        for header, value in headers.items():
-            if header.lower() in ['user-agent', 'x-lastlink-signature', 'authorization', 'x-webhook-id']:
-                logger.info(f"   └─ {header}: {value}")
-        
-        # Identificar tipo de evento (se disponível nos headers ou dados)
-        event_type = headers.get('X-Event-Type', 'unknown')
-        if isinstance(data, dict):
-            event_type = data.get('event_type', data.get('type', event_type))
-        
-        # Imprimir dados recebidos
-        print_received_data(data, event_type)
-        
-        # Log para arquivo também
-        logger.info(f"Webhook recebido - Tipo: {event_type}, Dados: {json.dumps(data, default=str, ensure_ascii=False)}")
-        
-        # Resposta de sucesso
-        return jsonify({
-            "status": "success",
-            "message": "Webhook recebido com sucesso",
-            "timestamp": datetime.now().isoformat(),
-            "event_type": event_type
-        }), 200
-        
-    except Exception as e:
-        error_msg = f"Erro ao processar webhook: {str(e)}"
-        logger.error(f"❌ ERRO: {error_msg}")
-        
-        return jsonify({
-            "status": "error",
-            "message": error_msg,
-            "timestamp": datetime.now().isoformat()
-        }), 400
+@app.route('/info', methods=['GET'])
+def webhook_info():
+    """Informações sobre o webhook"""
+    return jsonify({
+        "service": "Custom Webhook Receiver",
+        "version": "1.0.0",
+        "endpoints": {
+            "main_webhook": "/webhook",
+            "custom_webhook": "/webhook/<custom_path>",
+            "health_check": "/health",
+            "info": "/info"
+        },
+        "supported_formats": ["JSON", "XML", "Form Data", "Multipart", "Raw Data"],
+        "security": {
+            "token_auth": bool(WEBHOOK_TOKEN),
+            "signature_verification": bool(WEBHOOK_SECRET)
+        },
+        "timestamp": datetime.now().isoformat()
+    }), 200
 
-@app.route('/webhook/lastlink/orders', methods=['POST'])
-def lastlink_orders_webhook():
-    """
-    Endpoint específico para webhooks de pedidos
-    """
-    try:
-        data = request.get_json()
-        print_received_data(data, "order")
-        
-        # Processar dados específicos de pedidos
-        if data and isinstance(data, dict):
-            order_id = data.get('order_id', data.get('id'))
-            status = data.get('status')
-            customer = data.get('customer', {})
-            
-            logger.info("📦 RESUMO DO PEDIDO:")
-            logger.info("-"*30)
-            logger.info(f"🆔 ID do Pedido: {order_id}")
-            logger.info(f"📊 Status: {status}")
-            logger.info(f"👤 Cliente: {customer.get('name', 'N/A')}")
-            logger.info(f"📧 Email: {customer.get('email', 'N/A')}")
-        
-        return jsonify({"status": "success", "message": "Webhook de pedido processado"}), 200
-        
-    except Exception as e:
-        logger.error(f"❌ Erro no webhook de pedidos: {str(e)}")
-        return jsonify({"status": "error", "message": str(e)}), 400
+@app.errorhandler(404)
+def not_found(error):
+    logger.warning(f"404 - Path not found: {request.path}")
+    return jsonify({
+        "error": "Endpoint not found",
+        "available_endpoints": ["/webhook", "/webhook/<custom_path>", "/health", "/info"]
+    }), 404
 
-@app.route('/webhook/lastlink/payments', methods=['POST'])
-def lastlink_payments_webhook():
-    """
-    Endpoint específico para webhooks de pagamentos
-    """
-    try:
-        data = request.get_json()
-        print_received_data(data, "payment")
-        
-        # Processar dados específicos de pagamentos
-        if data and isinstance(data, dict):
-            payment_id = data.get('payment_id', data.get('id'))
-            amount = data.get('amount')
-            status = data.get('status')
-            method = data.get('payment_method')
-            
-            logger.info("💳 RESUMO DO PAGAMENTO:")
-            logger.info("-"*30)
-            logger.info(f"🆔 ID do Pagamento: {payment_id}")
-            logger.info(f"💰 Valor: {amount}")
-            logger.info(f"📊 Status: {status}")
-            logger.info(f"💳 Método: {method}")
-        
-        return jsonify({"status": "success", "message": "Webhook de pagamento processado"}), 200
-        
-    except Exception as e:
-        logger.error(f"❌ Erro no webhook de pagamentos: {str(e)}")
-        return jsonify({"status": "error", "message": str(e)}), 400
-
-@app.route('/webhook/lastlink/customers', methods=['POST'])
-def lastlink_customers_webhook():
-    """
-    Endpoint específico para webhooks de clientes
-    """
-    try:
-        data = request.get_json()
-        print_received_data(data, "customer")
-        
-        # Processar dados específicos de clientes
-        if data and isinstance(data, dict):
-            customer_id = data.get('customer_id', data.get('id'))
-            name = data.get('name')
-            email = data.get('email')
-            action = data.get('action', 'unknown')
-            
-            logger.info("👤 RESUMO DO CLIENTE:")
-            logger.info("-"*30)
-            logger.info(f"🆔 ID do Cliente: {customer_id}")
-            logger.info(f"👤 Nome: {name}")
-            logger.info(f"📧 Email: {email}")
-            logger.info(f"⚡ Ação: {action}")
-        
-        return jsonify({"status": "success", "message": "Webhook de cliente processado"}), 200
-        
-    except Exception as e:
-        logger.error(f"❌ Erro no webhook de clientes: {str(e)}")
-        return jsonify({"status": "error", "message": str(e)}), 400
-
-# Log de inicialização apenas uma vez para evitar spam nos logs
-if not hasattr(print_received_data, '_logged'):
-    port = os.getenv('PORT', '5001')
-    logger.info(f"🚀 Webhook Lastlink inicializado na porta {port}")
-    logger.info("📡 Endpoints: /, /health, /webhook/lastlink/*")
-    print_received_data._logged = True
-
-# REMOVIDO: app.run() - o Gunicorn gerencia a execução
-# Quando usar Gunicorn, não incluir app.run()
+@app.errorhandler(405)
+def method_not_allowed(error):
+    logger.warning(f"405 - Method not allowed: {request.method} {request.path}")
+    return jsonify({
+        "error": "Method not allowed",
+        "message": "Use POST for webhook endpoints"
+    }), 405
 
 if __name__ == '__main__':
-    # Este bloco só será executado se rodar diretamente com Python
-    # Para desenvolvimento local apenas
-    port = int(os.getenv('PORT', 5001))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    logger.info("🚀 Starting Custom Webhook Receiver")
+    logger.info(f"🌐 Server running on {HOST}:{PORT}")
+    logger.info(f"🔐 Token auth: {'Enabled' if WEBHOOK_TOKEN else 'Disabled'}")
+    logger.info(f"🔒 Signature verification: {'Enabled' if WEBHOOK_SECRET else 'Disabled'}")
+    
+    app.run(
+        host=HOST,
+        port=PORT,
+        debug=False,
+        threaded=True
+    )
